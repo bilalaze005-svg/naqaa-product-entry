@@ -7,10 +7,16 @@ import { createClient } from '@supabase/supabase-js'
 const URL = import.meta.env.VITE_SUPABASE_URL
 const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 
-if (!URL || !KEY) {
-  console.error('❌ أضف VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY في .env.local')
-}
+export const configError = (!URL || !KEY)
+  ? '⚠️ إعدادات الاتصال ناقصة: أضف VITE_SUPABASE_URL و VITE_SUPABASE_ANON_KEY بإعدادات Vercel (Environment Variables) ثم أعد النشر (Redeploy).'
+  : null
 
-export const supabase = createClient(URL, KEY, {
-  auth: { autoRefreshToken: true, persistSession: true },
-})
+if (configError) console.error(configError)
+
+// ✅ عميل وهمي بديل إذا الإعدادات ناقصة — يمنع انهيار كامل الصفحة (صفحة بيضاء)
+export const supabase = configError
+  ? { from: () => ({ select: () => ({ order: () => Promise.resolve({ data: [], error: { message: configError } }) }) }) }
+  : createClient(URL, KEY, {
+      auth: { autoRefreshToken: true, persistSession: true },
+    })
+

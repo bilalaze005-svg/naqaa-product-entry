@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { supabase } from './lib/supabase.js'
+import { supabase, configError } from './lib/supabase.js'
 
 const EMPTY_FORM = {
   name: '', price: '', cost_price: '', carton_price: '', units: '',
@@ -191,6 +191,12 @@ export default function App() {
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', paddingBottom: 40 }}>
       {toast && <Toast {...toast} onDone={() => setToast(null)} />}
+
+      {configError && (
+        <div style={{ background: '#FEF3C7', color: '#92400E', padding: '14px 18px', fontSize: 13, fontWeight: 700, textAlign: 'center', lineHeight: 1.6 }}>
+          {configError}
+        </div>
+      )}
 
       <div style={{ background: 'linear-gradient(135deg,#1B5E20,#2E7D32)', color: 'white', padding: '22px 20px', textAlign: 'center' }}>
         <div style={{ fontSize: 22, fontWeight: 900 }}>📦 نقاء — إدخال المنتجات</div>
