@@ -1,0 +1,25 @@
+{
+  "name": "naqaa-product-entry",
+  "version": "1.0.0",
+  "description": "تطبيق إدخال المنتجات - نقاء (مع إزالة خلفية تلقائية بالذكاء الاصطناعي)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5176",
+    "build": "vite build",
+    "preview": "vite preview --port 5176"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@supabase/supabase-js": "^2.47.3",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/android": "^6.0.0",
+    "@imgly/background-removal": "^1.5.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.19",
+    "@capacitor/cli": "^6.0.0"
+  }
+}
