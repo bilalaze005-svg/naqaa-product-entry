@@ -1,5 +1,9 @@
 {
-  "appId": "com.naqaa.customer",
-  "appName": "naqaa-customer",
-  "webDir": "dist"
+  "appId": "com.naqaa.product-entry",
+  "appName": "naqaa-product-entry",
+  "webDir": "dist",
+  "server": {
+    "url": "https://naqaa-product-entry.vercel.app",
+    "cleartext": true
+  }
 }
