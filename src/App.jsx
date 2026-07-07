@@ -1,6 +1,97 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase, configError } from './lib/supabase.js'
 
+// ── مكوّن قارئ الباركود بالكاميرا (نفس أسلوب لوحة الإدارة) ──
+function BarcodeScanner({ onDetected, onClose }) {
+  const videoRef = useRef(null)
+  const streamRef = useRef(null)
+  const [error, setError] = useState('')
+  const [manualCode, setManualCode] = useState('')
+
+  useEffect(() => {
+    startCamera()
+    return () => stopCamera()
+  }, [])
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop())
+      streamRef.current = null
+    }
+  }
+
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+      })
+      streamRef.current = stream
+      if (videoRef.current) videoRef.current.srcObject = stream
+
+      if ('BarcodeDetector' in window) {
+        const detector = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'upc_a', 'upc_e'] })
+        const scan = async () => {
+          if (!videoRef.current || !streamRef.current) return
+          try {
+            const barcodes = await detector.detect(videoRef.current)
+            if (barcodes.length > 0) {
+              stopCamera()
+              onDetected(barcodes[0].rawValue)
+              return
+            }
+          } catch {}
+          if (streamRef.current) setTimeout(scan, 300)
+        }
+        videoRef.current.addEventListener('play', () => setTimeout(scan, 500))
+      } else {
+        setError('المتصفح لا يدعم قراءة الباركود التلقائية — استخدم Chrome على Android أو أدخل الرقم يدوياً')
+      }
+    } catch (err) {
+      setError('تعذّر فتح الكاميرا: ' + err.message)
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.85)', zIndex: 99999, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: 'white', borderRadius: 20, padding: 24, width: 360, maxWidth: '95vw' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h3 style={{ fontWeight: 800, fontSize: 17, margin: 0 }}>📷 مسح الباركود</h3>
+          <button onClick={() => { stopCamera(); onClose() }} style={{ background: '#fee2e2', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer', fontSize: 16, color: '#dc2626' }}>✕</button>
+        </div>
+
+        <div style={{ position: 'relative', borderRadius: 14, overflow: 'hidden', background: '#000', marginBottom: 16 }}>
+          <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: 220, objectFit: 'cover', display: 'block' }} />
+          <div style={{ position: 'absolute', top: '50%', left: '10%', right: '10%', height: 2, background: '#ef4444', boxShadow: '0 0 8px #ef4444', animation: 'scan-line 1.5s ease-in-out infinite alternate' }} />
+          <div style={{ position: 'absolute', inset: 0, border: '3px solid rgba(255,255,255,.3)', borderRadius: 14, pointerEvents: 'none' }} />
+          <style>{`@keyframes scan-line { from { top: 30% } to { top: 70% } }`}</style>
+        </div>
+
+        {error ? (
+          <div style={{ background: '#fff1f2', borderRadius: 10, padding: '10px 14px', fontSize: 13, color: '#dc2626', marginBottom: 14 }}>⚠️ {error}</div>
+        ) : (
+          <div style={{ textAlign: 'center', fontSize: 13, color: '#64748b', marginBottom: 14 }}>
+            🔍 وجّه الكاميرا نحو الباركود... سيُقرأ تلقائياً
+          </div>
+        )}
+
+        <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 14 }}>
+          <label style={{ fontSize: 12, fontWeight: 700, color: '#64748b', display: 'block', marginBottom: 6 }}>أو أدخل الباركود يدوياً:</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input style={{ ...inputStyle, flex: 1, fontSize: 15 }}
+              value={manualCode} onChange={e => setManualCode(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && manualCode.trim()) { stopCamera(); onDetected(manualCode.trim()) } }}
+              placeholder="اكتب الرقم + Enter" />
+            <button style={{ padding: '8px 16px', borderRadius: 12, border: 'none', background: '#2E7D32', color: 'white', fontWeight: 800, cursor: 'pointer' }}
+              onClick={() => { if (manualCode.trim()) { stopCamera(); onDetected(manualCode.trim()) } }}>
+              ✅
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const EMPTY_FORM = {
   name: '', price: '', cost_price: '', carton_price: '', units: '',
   stock: '0', min_stock: '5', sku: '', description: '',
@@ -30,6 +121,7 @@ export default function App() {
   const [processing, setProcessing] = useState(false)
   const [progressMsg, setProgressMsg] = useState('')
   const [saving, setSaving] = useState(false)
+  const [showScanner, setShowScanner] = useState(false)
   const [toast, setToast] = useState(null)
   const fileInputRef = useRef(null)
   const cameraInputRef = useRef(null)
@@ -282,7 +374,15 @@ export default function App() {
             <Field label="المخزون الحالي"><input type="number" style={inputStyle} value={form.stock} onChange={F('stock')} /></Field>
             <Field label="الحد الأدنى للتنبيه"><input type="number" style={inputStyle} value={form.min_stock} onChange={F('min_stock')} /></Field>
           </div>
-          <Field label="SKU (اختياري)"><input style={inputStyle} value={form.sku} onChange={F('sku')} placeholder="رمز المنتج" /></Field>
+          <Field label="الباركود / SKU (اختياري)">
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input style={inputStyle} value={form.sku} onChange={F('sku')} placeholder="اكتب يدوياً أو امسح بالكاميرا" />
+              <button type="button" onClick={() => setShowScanner(true)}
+                style={{ padding: '0 16px', borderRadius: 12, border: 'none', background: '#EEF4FF', color: '#1565C0', fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>
+                📷 مسح
+              </button>
+            </div>
+          </Field>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <Field label="الفئة (اختياري)">
@@ -310,6 +410,13 @@ export default function App() {
           </button>
         </div>
       </div>
+
+      {showScanner && (
+        <BarcodeScanner
+          onDetected={(code) => { setForm(f => ({ ...f, sku: code })); setShowScanner(false); showToast('✅ تم قراءة الباركود: ' + code) }}
+          onClose={() => setShowScanner(false)}
+        />
+      )}
     </div>
   )
 }
