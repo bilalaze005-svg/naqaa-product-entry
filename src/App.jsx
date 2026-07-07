@@ -149,7 +149,7 @@ export default function App() {
   const save = async () => {
     if (!form.name.trim()) { showToast('⚠️ اسم المنتج مطلوب', 'error'); return }
     if (!form.price) { showToast('⚠️ السعر مطلوب', 'error'); return }
-    if (!finalImage) { showToast('⚠️ عالج الصورة أولاً قبل الحفظ', 'error'); return }
+    // ✅ معالجة الصورة اختيارية الآن — نستخدم النسخة المعالجة إن وُجدت، وإلا الأصلية، وإلا بدون صورة
 
     setSaving(true)
     try {
@@ -163,7 +163,7 @@ export default function App() {
         min_stock: parseInt(form.min_stock) || 5,
         sku: form.sku.trim() || null,
         description: form.description.trim() || null,
-        image: finalImage,
+        image: finalImage || rawImage || null,
         brand_id: form.brand_id ? parseInt(form.brand_id) : null,
         disabled: false,
         created_at: new Date().toISOString(),
@@ -255,6 +255,11 @@ export default function App() {
                   إعادة الاختيار
                 </button>
               </div>
+              {!finalImage && !processing && (
+                <div style={{ textAlign: 'center', fontSize: 11.5, color: '#94a3b8', marginTop: 8 }}>
+                  المعالجة اختيارية — تقدر تحفظ المنتج بالصورة الأصلية مباشرة بدون معالجة
+                </div>
+              )}
             </div>
           )}
         </div>
