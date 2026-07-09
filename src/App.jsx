@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase, configError } from './lib/supabase.js'
-import { uploadImageBlob } from './lib/imageUpload.js'
+import { uploadImageBlob, toWebP } from './lib/imageUpload.js'
 
 // ── مكوّن قارئ الباركود بالكاميرا (نفس أسلوب لوحة الإدارة) ──
 function BarcodeScanner({ onDetected, onClose }) {
@@ -127,6 +127,14 @@ export default function App() {
   const fileInputRef = useRef(null)
   const cameraInputRef = useRef(null)
 
+  // ── بحث وتعديل منتج موجود ──
+  const [mode, setMode] = useState('form')          // 'form' | 'search'
+  const [editingId, setEditingId] = useState(null)  // معرّف المنتج الجاري تعديله، null = إضافة جديدة
+  const [existingImageUrl, setExistingImageUrl] = useState(null) // صورة المنتج الحالية (وقت التعديل، قبل اختيار صورة جديدة)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [searching, setSearching] = useState(false)
+
   const showToast = (msg, type = 'ok') => setToast({ msg, type })
 
   useEffect(() => {
@@ -139,6 +147,67 @@ export default function App() {
       setBrands(data || [])
     })
   }, [])
+
+  // ── بحث مؤجل (debounce) عن منتجات مطابقة للاسم أو الباركود ──
+  useEffect(() => {
+    if (mode !== 'search' || !searchQuery.trim()) { setSearchResults([]); return }
+    const timer = setTimeout(async () => {
+      setSearching(true)
+      try {
+        const q = searchQuery.trim()
+        const like = `%${q}%`
+        const { data, error } = await supabase
+          .from('products')
+          .select('id,name,sku,price,stock,image')
+          .or(`name.ilike.${like},sku.ilike.${like}`)
+          .order('name')
+          .limit(15)
+        if (error) throw error
+        setSearchResults(data || [])
+      } catch (err) {
+        console.error('❌ خطأ البحث:', err)
+        showToast('❌ خطأ في البحث: ' + err.message, 'error')
+      } finally {
+        setSearching(false)
+      }
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [searchQuery, mode])
+
+  // ── تحميل بيانات منتج مختار للتعديل ──
+  const selectProduct = async (p) => {
+    setSearching(true)
+    try {
+      const { data: full, error } = await supabase.from('products').select('*').eq('id', p.id).single()
+      if (error) throw error
+      const { data: catLinks } = await supabase.from('product_categories').select('category_id').eq('product_id', p.id).limit(1)
+
+      setForm({
+        name: full.name || '',
+        price: full.price ?? '',
+        cost_price: full.cost_price ?? '',
+        carton_price: full.carton_price ?? '',
+        units: full.units ?? '',
+        stock: String(full.stock ?? '0'),
+        min_stock: String(full.min_stock ?? '5'),
+        sku: full.sku || '',
+        description: full.description || '',
+        category_id: catLinks?.[0]?.category_id ? String(catLinks[0].category_id) : '',
+        brand_id: full.brand_id ? String(full.brand_id) : '',
+      })
+      setEditingId(full.id)
+      setExistingImageUrl(full.image || null)
+      setRawImage(null)
+      setFinalImage(null)
+      setMode('form')
+      showToast('✅ تم تحميل بيانات المنتج — عدّل ما تريد ثم احفظ')
+    } catch (err) {
+      console.error('❌ خطأ تحميل المنتج:', err)
+      showToast('❌ خطأ تحميل بيانات المنتج: ' + err.message, 'error')
+    } finally {
+      setSearching(false)
+    }
+  }
 
   const F = (key) => (e) => setForm(f => ({ ...f, [key]: e.target.value }))
 
@@ -237,6 +306,8 @@ export default function App() {
     setForm(EMPTY_FORM)
     setRawImage(null)
     setFinalImage(null)
+    setEditingId(null)
+    setExistingImageUrl(null)
   }
 
   const save = async () => {
@@ -246,15 +317,15 @@ export default function App() {
 
     setSaving(true)
     try {
-      // رفع الصورة إلى Supabase Storage بدل حفظها base64 مباشرة في الجدول
-      // (كانت كل صورة — بعد معالجة الذكاء الاصطناعي 1000×1000 — تُحفظ كنص base64 ضخم
-      // داخل عمود products.image، ما يُثقل كل استعلام يقرأ جدول المنتجات لاحقاً)
-      let imageUrl = null
+      // رفع الصورة إلى Supabase Storage (بصيغة WebP مضغوطة) بدل حفظها base64 مباشرة في الجدول.
+      // عند التعديل بدون اختيار صورة جديدة، تبقى صورة المنتج الحالية (existingImageUrl) كما هي.
+      let imageUrl = editingId ? existingImageUrl : null
       const sourceImage = finalImage || rawImage
       if (sourceImage) {
+        setProgressMsg('🖼️ جارِ تحويل الصورة إلى WebP...')
+        const webpBlob = await toWebP(sourceImage)
         setProgressMsg('⏳ جارِ رفع الصورة...')
-        const blob = await (await fetch(sourceImage)).blob()
-        imageUrl = await uploadImageBlob(blob)
+        imageUrl = await uploadImageBlob(webpBlob)
         setProgressMsg('')
       }
 
@@ -270,21 +341,33 @@ export default function App() {
         description: form.description.trim() || null,
         image: imageUrl,
         brand_id: form.brand_id ? parseInt(form.brand_id) : null,
-        disabled: false,
-        created_at: new Date().toISOString(),
-      }
-      const { data: inserted, error } = await supabase.from('products').insert(row).select('id').single()
-      if (error) throw error
-
-      // ربط الفئة إن اختيرت
-      if (form.category_id && inserted?.id) {
-        const { error: catErr } = await supabase.from('product_categories').insert({
-          product_id: inserted.id, category_id: parseInt(form.category_id),
-        })
-        if (catErr) console.error('⚠️ خطأ ربط الفئة (المنتج حُفظ رغم ذلك):', catErr)
       }
 
-      showToast('✅ تم حفظ المنتج بنجاح!')
+      let productId = editingId
+      if (editingId) {
+        const { error } = await supabase.from('products').update(row).eq('id', editingId)
+        if (error) throw error
+      } else {
+        row.disabled = false
+        row.created_at = new Date().toISOString()
+        const { data: inserted, error } = await supabase.from('products').insert(row).select('id').single()
+        if (error) throw error
+        productId = inserted?.id
+      }
+
+      // ربط الفئة — نحذف الربط القديم دائماً (سواء إضافة أو تعديل) ثم نربط الفئة الجديدة إن اختيرت
+      if (productId) {
+        const { error: delCatErr } = await supabase.from('product_categories').delete().eq('product_id', productId)
+        if (delCatErr) console.error('⚠️ خطأ حذف ربط الفئة القديم:', delCatErr)
+        if (form.category_id) {
+          const { error: catErr } = await supabase.from('product_categories').insert({
+            product_id: productId, category_id: parseInt(form.category_id),
+          })
+          if (catErr) console.error('⚠️ خطأ ربط الفئة (المنتج حُفظ رغم ذلك):', catErr)
+        }
+      }
+
+      showToast(editingId ? '✅ تم حفظ التعديلات بنجاح!' : '✅ تم حفظ المنتج بنجاح!')
       resetAll()
     } catch (err) {
       console.error('❌ خطأ حفظ المنتج:', err)
@@ -309,12 +392,95 @@ export default function App() {
         <div style={{ fontSize: 12.5, opacity: .85, marginTop: 4 }}>أدخل بيانات المنتج مع صورة بخلفية بيضاء تلقائية</div>
       </div>
 
+      <div style={{ padding: '14px 18px 0' }}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setMode('form')}
+            style={{ flex: 1, padding: '10px 8px', borderRadius: 14, border: 'none', fontWeight: 800, fontSize: 13,
+              background: mode === 'form' ? '#2E7D32' : '#F1F5F9', color: mode === 'form' ? 'white' : '#475569', cursor: 'pointer' }}>
+            {editingId ? '✏️ تعديل المنتج' : '➕ منتج جديد'}
+          </button>
+          <button onClick={() => setMode('search')}
+            style={{ flex: 1, padding: '10px 8px', borderRadius: 14, border: 'none', fontWeight: 800, fontSize: 13,
+              background: mode === 'search' ? '#2E7D32' : '#F1F5F9', color: mode === 'search' ? 'white' : '#475569', cursor: 'pointer' }}>
+            🔍 بحث وتعديل
+          </button>
+        </div>
+      </div>
+
+      {mode === 'search' && (
+        <div style={{ padding: 18 }}>
+          <div style={{ background: 'white', borderRadius: 18, padding: 16, boxShadow: '0 2px 10px rgba(0,0,0,.06)' }}>
+            <input
+              autoFocus
+              style={inputStyle}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="🔍 اكتب اسم المنتج أو الباركود..."
+            />
+
+            {searching && (
+              <div style={{ textAlign: 'center', padding: 20, color: '#94a3b8', fontSize: 13 }}>⏳ جارِ البحث...</div>
+            )}
+
+            {!searching && searchQuery.trim() && searchResults.length === 0 && (
+              <div style={{ textAlign: 'center', padding: 20, color: '#94a3b8', fontSize: 13 }}>لا توجد نتائج مطابقة</div>
+            )}
+
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {searchResults.map((p) => (
+                <button key={p.id} onClick={() => selectProduct(p)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 10, borderRadius: 14, border: '1.5px solid #E2E8F0', background: '#FAFAFA', cursor: 'pointer', textAlign: 'right', fontFamily: 'inherit' }}>
+                  {p.image ? (
+                    <img src={p.image} alt="" style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 10, flexShrink: 0 }} />
+                  ) : (
+                    <div style={{ width: 44, height: 44, borderRadius: 10, background: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>📦</div>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 800, fontSize: 13.5, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+                    <div style={{ fontSize: 11.5, color: '#94a3b8', marginTop: 2 }}>
+                      {p.price} دج · مخزون {p.stock ?? 0} {p.sku ? `· ${p.sku}` : ''}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 18 }}>›</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mode === 'form' && (
       <div style={{ padding: 18 }}>
+        {editingId && (
+          <div style={{ background: '#EEF4FF', color: '#1565C0', borderRadius: 14, padding: '10px 14px', marginBottom: 16, fontSize: 13, fontWeight: 700, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>✏️ تعديل: {form.name || 'منتج'}</span>
+            <button onClick={resetAll} style={{ background: 'none', border: 'none', color: '#1565C0', fontWeight: 900, cursor: 'pointer', fontSize: 13, textDecoration: 'underline' }}>
+              إلغاء / منتج جديد
+            </button>
+          </div>
+        )}
+
         {/* ── قسم الصورة ── */}
         <div style={{ background: 'white', borderRadius: 18, padding: 16, marginBottom: 16, boxShadow: '0 2px 10px rgba(0,0,0,.06)' }}>
           <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 12 }}>📷 صورة المنتج</div>
 
-          {!rawImage ? (
+          {!rawImage && existingImageUrl ? (
+            <div>
+              <img src={existingImageUrl} alt="" style={{ width: '100%', height: 180, objectFit: 'contain', borderRadius: 12, background: '#F8FAFC', marginBottom: 10 }} />
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => fileInputRef.current?.click()}
+                  style={{ flex: 1, padding: '12px 8px', borderRadius: 14, border: '2px dashed #CBD5E1', background: '#F8FAFC', fontWeight: 800, fontSize: 12.5, color: '#475569', cursor: 'pointer' }}>
+                  📁 تغيير من الجهاز
+                </button>
+                <button onClick={() => cameraInputRef.current?.click()}
+                  style={{ flex: 1, padding: '12px 8px', borderRadius: 14, border: '2px dashed #86EFAC', background: '#F0FDF4', fontWeight: 800, fontSize: 12.5, color: '#166534', cursor: 'pointer' }}>
+                  📸 تغيير بالكاميرا
+                </button>
+                <input ref={fileInputRef} type="file" accept="image/*" onChange={onFile} style={{ display: 'none' }} />
+                <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: 'none' }} />
+              </div>
+            </div>
+          ) : !rawImage ? (
             <div style={{ display: 'flex', gap: 10 }}>
               <button onClick={() => fileInputRef.current?.click()}
                 style={{ flex: 1, padding: '18px 8px', borderRadius: 14, border: '2px dashed #CBD5E1', background: '#F8FAFC', fontWeight: 800, fontSize: 13, color: '#475569', cursor: 'pointer' }}>
@@ -420,10 +586,11 @@ export default function App() {
           <button disabled={saving} onClick={save}
             style={{ width: '100%', marginTop: 8, padding: 14, borderRadius: 16, border: 'none', fontWeight: 900, fontSize: 15,
               background: saving ? '#E2E8F0' : '#DC2626', color: 'white', cursor: saving ? 'default' : 'pointer' }}>
-            {saving ? '⏳ جارِ الحفظ...' : '💾 حفظ المنتج'}
+            {saving ? '⏳ جارِ الحفظ...' : (editingId ? '💾 حفظ التعديلات' : '💾 حفظ المنتج')}
           </button>
         </div>
       </div>
+      )}
 
       {showScanner && (
         <BarcodeScanner
