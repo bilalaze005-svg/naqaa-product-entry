@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase, configError } from './lib/supabase.js'
+import { uploadImageBlob } from './lib/imageUpload.js'
 
 // ── مكوّن قارئ الباركود بالكاميرا (نفس أسلوب لوحة الإدارة) ──
 function BarcodeScanner({ onDetected, onClose }) {
@@ -126,12 +127,6 @@ export default function App() {
   const fileInputRef = useRef(null)
   const cameraInputRef = useRef(null)
 
-  // ── البحث عن منتج موجود لتعديله ──
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchResults, setSearchResults] = useState([])
-  const [searching, setSearching] = useState(false)
-  const [editingId, setEditingId] = useState(null)
-
   const showToast = (msg, type = 'ok') => setToast({ msg, type })
 
   useEffect(() => {
@@ -146,64 +141,6 @@ export default function App() {
   }, [])
 
   const F = (key) => (e) => setForm(f => ({ ...f, [key]: e.target.value }))
-
-  // ── بحث تلقائي (مع تأخير بسيط) عن المنتجات بالاسم ──
-  useEffect(() => {
-    if (!searchQuery.trim()) { setSearchResults([]); setSearching(false); return }
-    setSearching(true)
-    const t = setTimeout(async () => {
-      const { data, error } = await supabase
-        .from('products')
-        .select('id,name,price,image,sku')
-        .ilike('name', `%${searchQuery.trim()}%`)
-        .order('name')
-        .limit(20)
-      setSearching(false)
-      if (error) { console.error(error); return }
-      setSearchResults(data || [])
-    }, 400)
-    return () => clearTimeout(t)
-  }, [searchQuery])
-
-  // ── تحميل منتج موجود بالكامل بالنموذج للتعديل ──
-  const loadProductForEdit = async (product) => {
-    setSearching(true)
-    try {
-      const { data: full, error } = await supabase.from('products').select('*').eq('id', product.id).single()
-      if (error) throw error
-
-      const { data: catLink } = await supabase
-        .from('product_categories')
-        .select('category_id')
-        .eq('product_id', product.id)
-        .limit(1)
-        .maybeSingle()
-
-      setForm({
-        name: full.name || '',
-        price: full.price ?? '',
-        cost_price: full.cost_price ?? '',
-        carton_price: full.carton_price ?? '',
-        units: full.units ?? '',
-        stock: full.stock ?? '0',
-        min_stock: full.min_stock ?? '5',
-        sku: full.sku || '',
-        description: full.description || '',
-        category_id: catLink?.category_id ? String(catLink.category_id) : '',
-        brand_id: full.brand_id ? String(full.brand_id) : '',
-      })
-      setRawImage(full.image || null)
-      setFinalImage(null) // يسمح بإعادة معالجة الصورة إذا رغب المستخدم، وإلا تُحفظ كما هي
-      setEditingId(full.id)
-      setSearchResults([])
-      setSearchQuery('')
-      showToast('✏️ تم تحميل المنتج — عدّل ما تريد ثم احفظ')
-    } catch (err) {
-      console.error('❌ خطأ تحميل المنتج:', err)
-      showToast('❌ فشل تحميل المنتج: ' + err.message, 'error')
-    }
-    setSearching(false)
-  }
 
   // ── التقاط/اختيار صورة ──
   const onFile = (e) => {
@@ -300,9 +237,6 @@ export default function App() {
     setForm(EMPTY_FORM)
     setRawImage(null)
     setFinalImage(null)
-    setEditingId(null)
-    setSearchQuery('')
-    setSearchResults([])
   }
 
   const save = async () => {
@@ -312,6 +246,18 @@ export default function App() {
 
     setSaving(true)
     try {
+      // رفع الصورة إلى Supabase Storage بدل حفظها base64 مباشرة في الجدول
+      // (كانت كل صورة — بعد معالجة الذكاء الاصطناعي 1000×1000 — تُحفظ كنص base64 ضخم
+      // داخل عمود products.image، ما يُثقل كل استعلام يقرأ جدول المنتجات لاحقاً)
+      let imageUrl = null
+      const sourceImage = finalImage || rawImage
+      if (sourceImage) {
+        setProgressMsg('⏳ جارِ رفع الصورة...')
+        const blob = await (await fetch(sourceImage)).blob()
+        imageUrl = await uploadImageBlob(blob)
+        setProgressMsg('')
+      }
+
       const row = {
         name: form.name.trim(),
         price: parseFloat(form.price) || 0,
@@ -322,43 +268,28 @@ export default function App() {
         min_stock: parseInt(form.min_stock) || 5,
         sku: form.sku.trim() || null,
         description: form.description.trim() || null,
-        image: finalImage || rawImage || null,
+        image: imageUrl,
         brand_id: form.brand_id ? parseInt(form.brand_id) : null,
         disabled: false,
+        created_at: new Date().toISOString(),
+      }
+      const { data: inserted, error } = await supabase.from('products').insert(row).select('id').single()
+      if (error) throw error
+
+      // ربط الفئة إن اختيرت
+      if (form.category_id && inserted?.id) {
+        const { error: catErr } = await supabase.from('product_categories').insert({
+          product_id: inserted.id, category_id: parseInt(form.category_id),
+        })
+        if (catErr) console.error('⚠️ خطأ ربط الفئة (المنتج حُفظ رغم ذلك):', catErr)
       }
 
-      let productId = editingId
-
-      if (editingId) {
-        // ✏️ تحديث منتج موجود
-        const { error } = await supabase.from('products').update(row).eq('id', editingId)
-        if (error) throw error
-      } else {
-        // ➕ إضافة منتج جديد
-        row.created_at = new Date().toISOString()
-        const { data: inserted, error } = await supabase.from('products').insert(row).select('id').single()
-        if (error) throw error
-        productId = inserted.id
-      }
-
-      // ربط/تحديث الفئة (نحذف الربط القديم أولاً ثم نضيف الجديد إن وُجد)
-      if (productId) {
-        const { error: delErr } = await supabase.from('product_categories').delete().eq('product_id', productId)
-        if (delErr) console.error('⚠️ خطأ حذف ربط الفئة القديم:', delErr)
-
-        if (form.category_id) {
-          const { error: catErr } = await supabase.from('product_categories').insert({
-            product_id: productId, category_id: parseInt(form.category_id),
-          })
-          if (catErr) console.error('⚠️ خطأ ربط الفئة (المنتج حُفظ رغم ذلك):', catErr)
-        }
-      }
-
-      showToast(editingId ? '✅ تم تحديث المنتج بنجاح!' : '✅ تم حفظ المنتج بنجاح!')
+      showToast('✅ تم حفظ المنتج بنجاح!')
       resetAll()
     } catch (err) {
       console.error('❌ خطأ حفظ المنتج:', err)
       showToast('❌ فشل الحفظ: ' + err.message, 'error')
+      setProgressMsg('')
     }
     setSaving(false)
   }
@@ -378,52 +309,7 @@ export default function App() {
         <div style={{ fontSize: 12.5, opacity: .85, marginTop: 4 }}>أدخل بيانات المنتج مع صورة بخلفية بيضاء تلقائية</div>
       </div>
 
-      {editingId && (
-        <div style={{ background: '#EEF4FF', color: '#1565C0', padding: '10px 18px', fontSize: 13, fontWeight: 800, textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12 }}>
-          <span>✏️ أنت تعدّل منتج موجود</span>
-          <button onClick={resetAll}
-            style={{ background: 'white', border: 'none', borderRadius: 10, padding: '5px 12px', fontWeight: 800, fontSize: 12, color: '#1565C0', cursor: 'pointer' }}>
-            ➕ منتج جديد
-          </button>
-        </div>
-      )}
-
       <div style={{ padding: 18 }}>
-        {/* ── قسم البحث عن منتج للتعديل ── */}
-        <div style={{ background: 'white', borderRadius: 18, padding: 16, marginBottom: 16, boxShadow: '0 2px 10px rgba(0,0,0,.06)' }}>
-          <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 12 }}>🔍 البحث عن منتج لتعديله</div>
-          <input
-            style={inputStyle}
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            placeholder="اكتب اسم المنتج للبحث..."
-          />
-          {searching && (
-            <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 8 }}>⏳ جارِ البحث...</div>
-          )}
-          {!searching && searchQuery.trim() && searchResults.length === 0 && (
-            <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 8 }}>لا توجد نتائج مطابقة</div>
-          )}
-          {searchResults.length > 0 && (
-            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 280, overflowY: 'auto' }}>
-              {searchResults.map(p => (
-                <button key={p.id} onClick={() => loadProductForEdit(p)}
-                  style={{ display: 'flex', alignItems: 'center', gap: 10, textAlign: 'right', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: 8, background: '#FAFAFA', cursor: 'pointer' }}>
-                  {p.image ? (
-                    <img src={p.image} alt="" style={{ width: 40, height: 40, objectFit: 'contain', borderRadius: 8, background: 'white', flexShrink: 0 }} />
-                  ) : (
-                    <div style={{ width: 40, height: 40, borderRadius: 8, background: '#E2E8F0', flexShrink: 0 }} />
-                  )}
-                  <div style={{ flex: 1, overflow: 'hidden' }}>
-                    <div style={{ fontWeight: 800, fontSize: 13 }}>{p.name}</div>
-                    <div style={{ fontSize: 11.5, color: '#64748b' }}>{p.price} ر.س{p.sku ? ' · ' + p.sku : ''}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
         {/* ── قسم الصورة ── */}
         <div style={{ background: 'white', borderRadius: 18, padding: 16, marginBottom: 16, boxShadow: '0 2px 10px rgba(0,0,0,.06)' }}>
           <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 12 }}>📷 صورة المنتج</div>
@@ -456,7 +342,7 @@ export default function App() {
                 )}
               </div>
 
-              {processing && (
+              {(processing || saving) && progressMsg && (
                 <div style={{ textAlign: 'center', fontSize: 12.5, color: '#1565C0', fontWeight: 700, marginBottom: 10, background: '#EEF4FF', borderRadius: 10, padding: 10 }}>
                   {progressMsg}
                 </div>
@@ -533,8 +419,8 @@ export default function App() {
 
           <button disabled={saving} onClick={save}
             style={{ width: '100%', marginTop: 8, padding: 14, borderRadius: 16, border: 'none', fontWeight: 900, fontSize: 15,
-              background: saving ? '#E2E8F0' : (editingId ? '#1565C0' : '#DC2626'), color: 'white', cursor: saving ? 'default' : 'pointer' }}>
-            {saving ? '⏳ جارِ الحفظ...' : (editingId ? '💾 تحديث المنتج' : '💾 حفظ المنتج')}
+              background: saving ? '#E2E8F0' : '#DC2626', color: 'white', cursor: saving ? 'default' : 'pointer' }}>
+            {saving ? '⏳ جارِ الحفظ...' : '💾 حفظ المنتج'}
           </button>
         </div>
       </div>
